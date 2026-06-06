@@ -15,14 +15,15 @@ from .cache import PriceCache
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/stream", tags=["streaming"])
-
 
 def create_stream_router(price_cache: PriceCache) -> APIRouter:
     """Create the SSE streaming router with a reference to the price cache.
 
-    This factory pattern lets us inject the PriceCache without globals.
+    A fresh ``APIRouter`` is built per call so the factory has no shared module
+    state — calling it twice yields two independent routers rather than
+    registering ``/prices`` twice on one global router.
     """
+    router = APIRouter(prefix="/api/stream", tags=["streaming"])
 
     @router.get("/prices")
     async def stream_prices(request: Request) -> StreamingResponse:
@@ -98,3 +99,7 @@ async def _generate_events(
     except asyncio.CancelledError:
         logger.info("SSE stream cancelled for: %s", client_ip)
         raise
+    finally:
+        # Runs on every exit path (normal disconnect, cancellation, error) so
+        # connection bookkeeping is always balanced against the connect log.
+        logger.info("SSE stream closed for: %s", client_ip)

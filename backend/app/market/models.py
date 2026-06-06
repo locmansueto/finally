@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,13 +14,18 @@ class PriceUpdate:
         green/red flash animation (``change`` / ``direction``).
       - ``day_open`` — the session/day open price, held stable across ticks.
         Drives the watchlist's "daily change %" (``day_change_percent``).
+
+    ``timestamp`` is required (Unix seconds). The only producer, ``PriceCache``,
+    always supplies it (stamping ``now()`` when a source omits one), so there is
+    no time-based default here that could make a "deterministic" test silently
+    depend on wall-clock time.
     """
 
     ticker: str
     price: float
     previous_price: float
     day_open: float
-    timestamp: float = field(default_factory=time.time)  # Unix seconds
+    timestamp: float  # Unix seconds
 
     @property
     def change(self) -> float:

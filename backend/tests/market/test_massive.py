@@ -1,9 +1,13 @@
 """Tests for MassiveDataSource (mocked)."""
 
+import asyncio
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import app.market.massive_client as massive_client
 from app.market.cache import PriceCache
 from app.market.massive_client import MassiveDataSource
 
@@ -267,3 +271,109 @@ class TestMassiveDataSource:
         assert cache.get_price("AAPL") == 190.50
 
         await source.stop()
+
+    async def test_double_start_raises(self):
+        """start() twice raises rather than leaking the first poller (L5)."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        with patch("app.market.massive_client.RESTClient"):
+            with patch.object(source, "_fetch_snapshots", return_value=[]):
+                await source.start(["AAPL"])
+                with pytest.raises(RuntimeError):
+                    await source.start(["GOOGL"])
+        await source.stop()
+
+    async def test_start_normalizes_tickers(self):
+        """start() normalizes its ticker list like add_ticker does (M6)."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        with patch("app.market.massive_client.RESTClient"):
+            with patch.object(source, "_fetch_snapshots", return_value=[]):
+                await source.start(["aapl", "  googl "])
+        assert source.get_tickers() == ["AAPL", "GOOGL"]
+        await source.stop()
+
+    async def test_add_ticker_during_poll_is_safe(self):
+        """Mutating the watchlist during an in-flight poll can't corrupt it (H5).
+
+        _fetch_snapshots receives a private copy of the ticker list, so adds
+        landing mid-poll neither raise 'list changed size during iteration' nor
+        get lost.
+        """
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        def slow_fetch(tickers):
+            # Iterate the received list slowly while the caller mutates
+            # self._tickers underneath us.
+            out = []
+            for t in tickers:
+                time.sleep(0.001)
+                out.append(_make_snapshot(t, 100.0))
+            return out
+
+        with patch.object(source, "_fetch_snapshots", side_effect=slow_fetch):
+            poll = asyncio.create_task(source._poll_once())
+            for i in range(50):
+                await source.add_ticker(f"T{i}")
+                await asyncio.sleep(0)
+            await poll  # must not raise
+
+        # The in-flight poll used the pre-mutation snapshot (just AAPL).
+        assert cache.get_price("AAPL") == 100.0
+        assert "T49" in source.get_tickers()
+
+    async def test_stop_is_bounded_when_poll_hangs(self, monkeypatch):
+        """stop() returns promptly even if a poll thread is stuck (M5).
+
+        to_thread() can't be cancelled, so without the wait_for bound stop()
+        would block for the full request. Here the 'request' sleeps far longer
+        than the (patched-small) shutdown ceiling, yet stop() still returns.
+        """
+        monkeypatch.setattr(massive_client, "SHUTDOWN_TIMEOUT", 0.2)
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=0.01)
+        source._client = MagicMock()
+        source._tickers = ["AAPL"]
+
+        hang_started = threading.Event()
+
+        def hang(tickers):
+            hang_started.set()
+            time.sleep(1.0)
+            return []
+
+        with patch.object(source, "_fetch_snapshots", side_effect=hang):
+            source._task = asyncio.create_task(source._poll_loop(), name="massive-poller")
+            # Wait until the worker thread is actually inside the hang.
+            await asyncio.to_thread(hang_started.wait, 1.0)
+            t0 = time.monotonic()
+            await source.stop()
+            elapsed = time.monotonic() - t0
+
+        assert elapsed < 0.9  # bounded by SHUTDOWN_TIMEOUT, not the 1.0s sleep
+        assert source._task is None
+
+    async def test_health_tracks_failures_and_recovery(self):
+        """health() flips unhealthy on a failed poll and recovers on success (N2)."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        assert source.health()["healthy"] is True  # nothing has failed yet
+
+        with patch.object(source, "_fetch_snapshots", side_effect=Exception("boom")):
+            await source._poll_once()
+        h = source.health()
+        assert h["healthy"] is False
+        assert h["consecutive_failures"] == 1
+
+        with patch.object(source, "_fetch_snapshots", return_value=[_make_snapshot("AAPL", 190.5)]):
+            await source._poll_once()
+        h = source.health()
+        assert h["healthy"] is True
+        assert h["consecutive_failures"] == 0
+        assert h["last_update"] is not None
