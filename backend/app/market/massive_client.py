@@ -98,16 +98,33 @@ class MassiveDataSource(MarketDataSource):
             processed = 0
             for snap in snapshots:
                 try:
-                    price = snap.last_trade.price
-                    # Massive timestamps are Unix milliseconds → convert to seconds
-                    timestamp = snap.last_trade.timestamp / 1000.0
+                    last_trade = snap.last_trade
+                    price = last_trade.price
+                    if price is None:
+                        raise ValueError("snapshot has no last-trade price")
+
+                    # Polygon/Massive trade timestamps are Unix NANOSECONDS
+                    # (SIP, falling back to the participant feed). Convert to
+                    # seconds; if absent, let the cache stamp it with now().
+                    raw_ts = last_trade.sip_timestamp or last_trade.participant_timestamp
+                    timestamp = raw_ts / 1_000_000_000.0 if raw_ts else None
+
+                    # Daily open for "daily change %": today's open, falling
+                    # back to the prior session's close before the market opens.
+                    day_open = None
+                    if snap.day is not None and snap.day.open:
+                        day_open = snap.day.open
+                    elif snap.prev_day is not None and snap.prev_day.close:
+                        day_open = snap.prev_day.close
+
                     self._cache.update(
                         ticker=snap.ticker,
                         price=price,
                         timestamp=timestamp,
+                        day_open=day_open,
                     )
                     processed += 1
-                except (AttributeError, TypeError) as e:
+                except (AttributeError, TypeError, ValueError) as e:
                     logger.warning(
                         "Skipping snapshot for %s: %s",
                         getattr(snap, "ticker", "???"),
