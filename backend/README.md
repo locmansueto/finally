@@ -37,12 +37,19 @@ uv run --extra dev pytest tests/market/test_simulator.py
 uv run --extra dev pytest -v
 ```
 
-## Demo
+## Demos
 
-`rich` is an optional dependency in the `demo` extra (kept out of the runtime image):
+**Terminal dashboard** — Rich TUI (`rich` lives in the optional `demo` extra, kept out of the runtime image):
 
 ```bash
 uv run --extra demo market_data_demo.py
+```
+
+**Browser** — a single-file FastAPI app that serves one HTML page streaming live
+prices from the real SSE endpoint (`GET /api/stream/prices`). No extra needed:
+
+```bash
+uv run web_demo.py        # then open http://localhost:8000  (set PORT to change)
 ```
 
 ## Environment Variables
