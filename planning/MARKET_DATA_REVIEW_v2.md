@@ -6,6 +6,25 @@
 
 ---
 
+> ## ✅ Resolution status (branch `fix/market-data-review-v2-followups`)
+>
+> All actionable items below have since been implemented. **M1 was intentionally left alone** (verified the simulator already moves visibly on ~80% of ticks — see §4). Summary of what changed:
+>
+> - **H5** — `_poll_once` now snapshots the ticker list before `asyncio.to_thread`; `_fetch_snapshots(tickers)` iterates the private copy.
+> - **M5** — explicit connect/read timeouts on `RESTClient`; `stop()` bounds the wait with `asyncio.wait_for(SHUTDOWN_TIMEOUT)`.
+> - **N1** — `create_stream_router()` builds a fresh `APIRouter` per call (no module global).
+> - **N2** — `MarketDataSource.health()` added; `MassiveDataSource` tracks `last_update` + `consecutive_failures`, the simulator reports loop liveness.
+> - **N3** — added a test that drives the real `/prices` route handler and asserts the SSE headers.
+> - **H3** — `finally` cleanup in the SSE generator.
+> - **M2** — single seedable `np.random.Generator` drives GBM **and** event draws; tests pin a seed and assert a 2–5% shock fired.
+> - **M3** — Cholesky wrapped with an epsilon-nudge → uncorrelated fallback (with a test forcing a non-PD matrix).
+> - **M6 / L5** — shared `normalize_ticker()` used by both sources (incl. `start()`); double-`start()` now raises.
+> - **L1** — dead `event_loop_policy` fixture removed. **L2** — `PriceUpdate.timestamp` is now required. **L3** — rounding happens once, in the cache. **L4** — Massive `start()` logs the deduped count. **L6** — `rich` moved to a `demo` extra.
+>
+> **Result: 102 tests pass, ruff clean, 96% coverage.** The detailed findings below are retained for the record.
+
+---
+
 ## 1. Verdict
 
 The market-data subsystem is **well-built, clean, and genuinely tested**. All 85 tests pass, ruff is clean, and coverage is 96%. The four "must-fix before frontend integration" items from the prior `REVIEW.md` (C1, H1, H2, H4) are **correctly implemented and I confirmed them** — including validating the Massive SDK field/timestamp assumptions against the *actual* installed `massive==2.2.0` package, which is the one claim the prior review could not fully verify.

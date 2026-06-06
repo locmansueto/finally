@@ -1,10 +1,10 @@
-"""Tests for the SSE streaming generator."""
+"""Tests for the SSE streaming generator and route."""
 
 import json
 from types import SimpleNamespace
 
 from app.market.cache import PriceCache
-from app.market.stream import _generate_events
+from app.market.stream import _generate_events, create_stream_router
 
 
 class _FakeRequest:
@@ -65,3 +65,42 @@ async def test_data_sent_once_then_heartbeat_when_version_unchanged():
     # Subsequent iterations: version unchanged → keep-alive comments only.
     assert events[2] == ": keep-alive\n\n"
     assert all(not e.startswith("data: ") for e in events[2:])
+
+
+def test_factory_returns_independent_routers():
+    """Each create_stream_router() call yields a fresh router (N1).
+
+    The route must be registered exactly once per router — not accumulated on a
+    shared module-level router across calls.
+    """
+    cache = PriceCache()
+    r1 = create_stream_router(cache)
+    r2 = create_stream_router(cache)
+
+    assert r1 is not r2
+    paths1 = [r.path for r in r1.routes]
+    paths2 = [r.path for r in r2.routes]
+    assert paths1.count("/api/stream/prices") == 1
+    assert paths2.count("/api/stream/prices") == 1
+
+
+async def test_sse_route_sets_event_stream_headers():
+    """The /prices route handler returns a correctly-configured SSE response (N3).
+
+    Exercises the real route handler (the header-setting wrapper, not just the
+    generator) by invoking its endpoint directly. We assert on the returned
+    StreamingResponse without consuming the infinite body.
+    """
+    cache = PriceCache()
+    cache.update("AAPL", 190.50, day_open=188.00)
+    router = create_stream_router(cache)
+
+    route = next(r for r in router.routes if getattr(r, "path", None) == "/api/stream/prices")
+    request = _FakeRequest(disconnect_after=0)
+
+    response = await route.endpoint(request)
+
+    assert response.media_type == "text/event-stream"
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["connection"] == "keep-alive"
+    assert response.headers["x-accel-buffering"] == "no"
